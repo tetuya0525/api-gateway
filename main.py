@@ -1,6 +1,6 @@
 # ==============================================================================
-# 1. main.py (v2.2 - 改良版)
-# 認証ロジックをデコレータに分離し、コードの重複を排除しました。
+# 1. main.py (v2.3 - CORS対応版)
+# flask-corsを導入し、UIからのクロスオリジンリクエストを許可します。
 # ==============================================================================
 import os
 import requests
@@ -8,6 +8,7 @@ import firebase_admin
 from functools import wraps
 from firebase_admin import auth
 from flask import Flask, request, jsonify
+from flask_cors import CORS # ★★★ 改善点：CORSライブラリをインポート ★★★
 
 # Firebase Admin SDKを初期化
 try:
@@ -17,11 +18,14 @@ except ValueError:
 
 app = Flask(__name__)
 
+# ★★★ 改善点：CORSをアプリケーションに適用 ★★★
+# これにより、ブラウザからのAPI呼び出しが許可されます。
+CORS(app)
+
 # 環境変数からバックエンドサービスのURLを取得
 ARTICLE_INGEST_SERVICE_URL = os.environ.get("ARTICLE_INGEST_SERVICE_URL")
 MANUAL_WORKFLOW_TRIGGER_URL = os.environ.get("MANUAL_WORKFLOW_TRIGGER_URL")
 
-# ★★★ 改善点：認証チェックを行うデコレータを定義 ★★★
 def firebase_auth_required(f):
     """Firebase IDトークンを検証するデコレータ"""
     @wraps(f)
@@ -33,7 +37,6 @@ def firebase_auth_required(f):
         id_token = auth_header.split("Bearer ")[1]
         
         try:
-            # トークンを検証し、デコードされたトークンをルート関数に渡す
             decoded_token = auth.verify_id_token(id_token)
             kwargs['decoded_token'] = decoded_token
         except auth.InvalidIdTokenError:
@@ -50,8 +53,8 @@ def index():
     return "API Gateway is running.", 200
 
 @app.route("/dispatch/article", methods=["POST"])
-@firebase_auth_required  # ★デコレータを適用
-def dispatch_article(decoded_token): # ★検証済みのトークン情報を受け取る
+@firebase_auth_required
+def dispatch_article(decoded_token):
     """記事投入リクエストを受け付け、article-ingest-serviceに転送する"""
     try:
         if not ARTICLE_INGEST_SERVICE_URL:
@@ -70,8 +73,8 @@ def dispatch_article(decoded_token): # ★検証済みのトークン情報を�
         return jsonify({"status": "error", "message": f"ゲートウェイ内部エラー: {e}"}), 500
 
 @app.route("/dispatch/workflow", methods=["POST"])
-@firebase_auth_required # ★デコレータを適用
-def dispatch_workflow(decoded_token): # ★検証済みのトークン情報を受け取る
+@firebase_auth_required
+def dispatch_workflow(decoded_token):
     """ワークフロー開始リクエストを受け付け、manual-workflow-triggerに転送する"""
     try:
         if not MANUAL_WORKFLOW_TRIGGER_URL:
