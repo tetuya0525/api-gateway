@@ -1,14 +1,15 @@
 # ==============================================================================
-# 1. main.py
-# UIからのリクエストを認証し、バックエンドサービスに転送するAPIゲートウェイ。
+# 1. main.py (v2.2 - 改良版)
+# 認証ロジックをデコレータに分離し、コードの重複を排除しました。
 # ==============================================================================
 import os
 import requests
 import firebase_admin
+from functools import wraps
 from firebase_admin import auth
 from flask import Flask, request, jsonify
 
-# Firebase Admin SDKを初期化 (Cloud Run環境では自動検出)
+# Firebase Admin SDKを初期化
 try:
     firebase_admin.initialize_app()
 except ValueError:
@@ -20,23 +21,39 @@ app = Flask(__name__)
 ARTICLE_INGEST_SERVICE_URL = os.environ.get("ARTICLE_INGEST_SERVICE_URL")
 MANUAL_WORKFLOW_TRIGGER_URL = os.environ.get("MANUAL_WORKFLOW_TRIGGER_URL")
 
+# ★★★ 改善点：認証チェックを行うデコレータを定義 ★★★
+def firebase_auth_required(f):
+    """Firebase IDトークンを検証するデコレータ"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return jsonify({"status": "error", "message": "認証エラー: トークンがありません。"}), 403
+        
+        id_token = auth_header.split("Bearer ")[1]
+        
+        try:
+            # トークンを検証し、デコードされたトークンをルート関数に渡す
+            decoded_token = auth.verify_id_token(id_token)
+            kwargs['decoded_token'] = decoded_token
+        except auth.InvalidIdTokenError:
+            return jsonify({"status": "error", "message": "認証エラー: トークンが無効か、期限切れです。"}), 403
+        except Exception as e:
+            return jsonify({"status": "error", "message": f"認証エラー: {e}"}), 403
+            
+        return f(*args, **kwargs)
+    return decorated_function
+
 @app.route("/")
 def index():
     """サービス起動確認用のルートエンドポイント"""
     return "API Gateway is running.", 200
 
 @app.route("/dispatch/article", methods=["POST"])
-def dispatch_article():
-    """記事投入リクエストを検証・転送する"""
+@firebase_auth_required  # ★デコレータを適用
+def dispatch_article(decoded_token): # ★検証済みのトークン情報を受け取る
+    """記事投入リクエストを受け付け、article-ingest-serviceに転送する"""
     try:
-        # IDトークンを取得・検証
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return jsonify({"status": "error", "message": "認証エラー: トークンがありません。"}), 403
-        id_token = auth_header.split("Bearer ")[1]
-        decoded_token = auth.verify_id_token(id_token)
-        
-        # 検証後、リクエストを転送
         if not ARTICLE_INGEST_SERVICE_URL:
             return jsonify({"status": "error", "message": "設定エラー: 転送先URLが未設定です。"}), 500
 
@@ -48,25 +65,15 @@ def dispatch_article():
         )
         response.raise_for_status()
         return response.json(), response.status_code
-
-    except auth.InvalidIdTokenError:
-        return jsonify({"status": "error", "message": "認証エラー: トークンが無効か、期限切れです。"}), 403
     except Exception as e:
         print(f"予期せぬエラー: {e}")
         return jsonify({"status": "error", "message": f"ゲートウェイ内部エラー: {e}"}), 500
 
 @app.route("/dispatch/workflow", methods=["POST"])
-def dispatch_workflow():
-    """ワークフロー開始リクエストを検証・転送する"""
+@firebase_auth_required # ★デコレータを適用
+def dispatch_workflow(decoded_token): # ★検証済みのトークン情報を受け取る
+    """ワークフロー開始リクエストを受け付け、manual-workflow-triggerに転送する"""
     try:
-        # IDトークンを検証
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return jsonify({"status": "error", "message": "認証エラー: トークンがありません。"}), 403
-        id_token = auth_header.split("Bearer ")[1]
-        decoded_token = auth.verify_id_token(id_token)
-
-        # 検証後、リクエストを転送
         if not MANUAL_WORKFLOW_TRIGGER_URL:
             return jsonify({"status": "error", "message": "設定エラー: 転送先URLが未設定です。"}), 500
         
@@ -77,9 +84,6 @@ def dispatch_workflow():
         )
         response.raise_for_status()
         return response.json(), response.status_code
-
-    except auth.InvalidIdTokenError:
-        return jsonify({"status": "error", "message": "認証エラー: トークンが無効か、期限切れです。"}), 403
     except Exception as e:
         print(f"予期せぬエラー: {e}")
         return jsonify({"status": "error", "message": f"ゲートウェイ内部エラー: {e}"}), 500
