@@ -1,6 +1,6 @@
-# =============================================================================
-# 1. main.py (v2.3 - CORS対応版)
-# flask-corsを導入し、UIからのクロスオリジンリクエストを許可します。
+# ==============================================================================
+# 1. main.py
+# 他サービス呼び出し時に、自身のIDトークンを付与する認証ロジックを追加。
 # ==============================================================================
 import os
 import requests
@@ -8,61 +8,63 @@ import firebase_admin
 from functools import wraps
 from firebase_admin import auth
 from flask import Flask, request, jsonify
-from flask_cors import CORS # ★★★ 改善点：CORSライブラリをインポート ★★★
+from flask_cors import CORS
+import google.auth.transport.requests
+import google.oauth2.id_token
 
-# Firebase Admin SDKを初期化
 try:
     firebase_admin.initialize_app()
 except ValueError:
     pass
 
 app = Flask(__name__)
-
-# ★★★ 改善点：CORSをアプリケーションに適用 ★★★
-# これにより、ブラウザからのAPI呼び出しが許可されます。
 CORS(app)
 
-# 環境変数からバックエンドサービスのURLを取得
 ARTICLE_INGEST_SERVICE_URL = os.environ.get("ARTICLE_INGEST_SERVICE_URL")
 MANUAL_WORKFLOW_TRIGGER_URL = os.environ.get("MANUAL_WORKFLOW_TRIGGER_URL")
 
+def get_service_to_service_auth_header(target_url):
+    """他のCloud Runサービスを呼び出すための認証ヘッダーを生成する"""
+    auth_req = google.auth.transport.requests.Request()
+    identity_token = google.oauth2.id_token.fetch_id_token(auth_req, target_url)
+    return {
+        'Authorization': f'Bearer {identity_token}',
+        'Content-Type': 'application/json'
+    }
+
 def firebase_auth_required(f):
-    """Firebase IDトークンを検証するデコレータ"""
+    """UIからのリクエストのFirebase IDトークンを検証するデコレータ"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
-            return jsonify({"status": "error", "message": "認証エラー: トークンがありません。"}), 403
+            return jsonify({"status": "error", "message": "認証エラー: UIからのトークンがありません。"}), 403
         
         id_token = auth_header.split("Bearer ")[1]
         
         try:
             decoded_token = auth.verify_id_token(id_token)
             kwargs['decoded_token'] = decoded_token
-        except auth.InvalidIdTokenError:
-            return jsonify({"status": "error", "message": "認証エラー: トークンが無効か、期限切れです。"}), 403
         except Exception as e:
-            return jsonify({"status": "error", "message": f"認証エラー: {e}"}), 403
+            return jsonify({"status": "error", "message": f"認証エラー: トークンが無効です。 {e}"}), 403
             
         return f(*args, **kwargs)
     return decorated_function
 
-@app.route("/")
-def index():
-    """サービス起動確認用のルートエンドポイント"""
-    return "API Gateway is running.", 200
-
 @app.route("/dispatch/article", methods=["POST"])
 @firebase_auth_required
 def dispatch_article(decoded_token):
-    """記事投入リクエストを受け付け、article-ingest-serviceに転送する"""
+    """記事投入リクエストを検証・転送する"""
     try:
         if not ARTICLE_INGEST_SERVICE_URL:
             return jsonify({"status": "error", "message": "設定エラー: 転送先URLが未設定です。"}), 500
 
+        # ★★★ 改善点：サービス間認証ヘッダーを付与 ★★★
+        auth_headers = get_service_to_service_auth_header(ARTICLE_INGEST_SERVICE_URL)
+
         response = requests.post(
             url=ARTICLE_INGEST_SERVICE_URL,
-            headers={'Content-Type': 'application/json'},
+            headers=auth_headers,
             data=request.get_data(),
             timeout=30 
         )
@@ -75,14 +77,17 @@ def dispatch_article(decoded_token):
 @app.route("/dispatch/workflow", methods=["POST"])
 @firebase_auth_required
 def dispatch_workflow(decoded_token):
-    """ワークフロー開始リクエストを受け付け、manual-workflow-triggerに転送する"""
+    """ワークフロー開始リクエストを検証・転送する"""
     try:
         if not MANUAL_WORKFLOW_TRIGGER_URL:
             return jsonify({"status": "error", "message": "設定エラー: 転送先URLが未設定です。"}), 500
-        
+
+        # ★★★ 改善点：サービス間認証ヘッダーを付与 ★★★
+        auth_headers = get_service_to_service_auth_header(MANUAL_WORKFLOW_TRIGGER_URL)
+
         response = requests.post(
             url=MANUAL_WORKFLOW_TRIGGER_URL,
-            headers={'Content-Type': 'application/json'},
+            headers=auth_headers,
             timeout=30
         )
         response.raise_for_status()
@@ -90,3 +95,28 @@ def dispatch_workflow(decoded_token):
     except Exception as e:
         print(f"予期せぬエラー: {e}")
         return jsonify({"status": "error", "message": f"ゲートウェイ内部エラー: {e}"}), 500
+
+# ==============================================================================
+# 2. requirements.txt
+# サービス間認証のため、google-authライブラリを追加。
+# ==============================================================================
+Flask==3.0.0
+requests==2.31.0
+firebase-admin==6.5.0
+gunicorn==21.2.0
+Flask-Cors==4.0.1
+google-auth==2.22.0
+
+# ==============================================================================
+# 3. Dockerfile
+#変更なし
+# ==============================================================================
+# ベースイメージ: Python 3.12-slim
+FROM python:3.12-slim
+ENV PYTHONUNBUFFERED True
+WORKDIR /app
+COPY requirements.txt requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+ENV PORT 8080
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "4", "main:app"]
