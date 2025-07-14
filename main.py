@@ -95,28 +95,3 @@ def dispatch_workflow(decoded_token):
     except Exception as e:
         print(f"予期せぬエラー: {e}")
         return jsonify({"status": "error", "message": f"ゲートウェイ内部エラー: {e}"}), 500
-
-# ==============================================================================
-# 2. requirements.txt
-# サービス間認証のため、google-authライブラリを追加。
-# ==============================================================================
-Flask==3.0.0
-requests==2.31.0
-firebase-admin==6.5.0
-gunicorn==21.2.0
-Flask-Cors==4.0.1
-google-auth==2.22.0
-
-# ==============================================================================
-# 3. Dockerfile
-#変更なし
-# ==============================================================================
-# ベースイメージ: Python 3.12-slim
-FROM python:3.12-slim
-ENV PYTHONUNBUFFERED True
-WORKDIR /app
-COPY requirements.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-ENV PORT 8080
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "4", "main:app"]
