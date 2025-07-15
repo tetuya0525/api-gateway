@@ -1,10 +1,10 @@
 # ==============================================================================
 # Memory Library - API Gateway Service (api-gateway)
-# main.py (v4.0 / Dialogue Index Integration)
+# main.py (v5.0 / Tag Management Integration)
 #
 # Role:         システムの唯一の公開窓口。UIからのリクエストを受け付け、
 #               認証を行い、適切な内部サービスへ安全に転送する。
-# Version:      4.0
+# Version:      5.0
 # Author:       心理 (Thinking Partner)
 # Last Updated: 2025-07-16
 # ==============================================================================
@@ -29,11 +29,11 @@ app = Flask(__name__)
 CORS(app)
 
 # --- 環境変数 ---
-# 内部サービスのURLを環境変数から読み込む
 ARTICLE_INGEST_SERVICE_URL = os.environ.get("ARTICLE_INGEST_SERVICE_URL")
 MANUAL_WORKFLOW_TRIGGER_URL = os.environ.get("MANUAL_WORKFLOW_TRIGGER_URL")
-# ★★★【新規】対話インデックスビルダーサービスのURLを追加 ★★★
 DIALOGUE_INDEX_BUILDER_URL = os.environ.get("DIALOGUE_INDEX_BUILDER_URL")
+# ★★★【新規】タグ管理サービスのURLを追加 ★★★
+TAG_MANAGEMENT_SERVICE_URL = os.environ.get("TAG_MANAGEMENT_SERVICE_URL")
 
 
 # --- 認証デコレーター ---
@@ -68,79 +68,66 @@ def get_service_to_service_token(audience_url):
         return None
 
 
-# --- ルーティング (Routing) ---
+# --- 汎用ディスパッチ関数 ---
+def dispatch_request(target_url_env_var, audience_url, timeout=60):
+    if not audience_url:
+        return jsonify({"status": "error", "message": f"設定エラー: {target_url_env_var}が未設定です。"}), 500
+    
+    service_token = get_service_to_service_token(audience_url)
+    if not service_token:
+        return jsonify({"status": "error", "message": "ゲートウェイ内部エラー: サービス間認証に失敗しました。"}), 500
 
-# ... (既存の /dispatch/article と /dispatch/workflow は変更なし) ...
+    try:
+        headers = {'Authorization': f'Bearer {service_token}', 'Content-Type': 'application/json'}
+        response = requests.post(
+            url=audience_url,
+            headers=headers,
+            data=request.get_data(), # UIからのリクエストボディをそのまま転送
+            timeout=timeout
+        )
+        response.raise_for_status()
+        return response.json(), response.status_code
+    except requests.exceptions.RequestException as e:
+        app.logger.error(f"{audience_url}への転送に失敗: {e}")
+        status_code = e.response.status_code if e.response else 503
+        return jsonify({"status": "error", "message": f"下流サービスへの接続に失敗しました。"}), status_code
+
+
+# --- ルーティング (Routing) ---
 
 @app.route("/dispatch/article", methods=["POST"])
 @firebase_auth_required
 def dispatch_article(decoded_token):
-    if not ARTICLE_INGEST_SERVICE_URL:
-        return jsonify({"status": "error", "message": "設定エラー: ARTICLE_INGEST_SERVICE_URLが未設定です。"}), 500
-    service_token = get_service_to_service_token(ARTICLE_INGEST_SERVICE_URL)
-    if not service_token:
-        return jsonify({"status": "error", "message": "ゲートウェイ内部エラー: サービス間認証に失敗しました。"}), 500
-    try:
-        headers = {'Authorization': f'Bearer {service_token}', 'Content-Type': 'application/json'}
-        response = requests.post(url=ARTICLE_INGEST_SERVICE_URL, headers=headers, data=request.get_data(), timeout=30)
-        response.raise_for_status()
-        return response.json(), response.status_code
-    except requests.exceptions.RequestException as e:
-        app.logger.error(f"article-ingest-serviceへの転送に失敗: {e}")
-        return jsonify({"status": "error", "message": "下流サービスへの接続に失敗しました。"}), e.response.status_code if e.response else 503
+    return dispatch_request("ARTICLE_INGEST_SERVICE_URL", ARTICLE_INGEST_SERVICE_URL, timeout=30)
 
 @app.route("/dispatch/workflow", methods=["POST"])
 @firebase_auth_required
 def dispatch_workflow(decoded_token):
-    if not MANUAL_WORKFLOW_TRIGGER_URL:
-        return jsonify({"status": "error", "message": "設定エラー: MANUAL_WORKFLOW_TRIGGER_URLが未設定です。"}), 500
-    service_token = get_service_to_service_token(MANUAL_WORKFLOW_TRIGGER_URL)
-    if not service_token:
-        return jsonify({"status": "error", "message": "ゲートウェイ内部エラー: サービス間認証に失敗しました。"}), 500
-    try:
-        headers = {'Authorization': f'Bearer {service_token}', 'Content-Type': 'application/json'}
-        response = requests.post(url=MANUAL_WORKFLOW_TRIGGER_URL, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json(), response.status_code
-    except requests.exceptions.RequestException as e:
-        app.logger.error(f"manual-workflow-triggerへの転送に失敗: {e}")
-        return jsonify({"status": "error", "message": "下流サービスへの接続に失敗しました。"}), e.response.status_code if e.response else 503
+    return dispatch_request("MANUAL_WORKFLOW_TRIGGER_URL", MANUAL_WORKFLOW_TRIGGER_URL, timeout=60)
 
-
-# ★★★【新規】対話インデックス構築のエンドポイント ★★★
 @app.route("/dispatch/build-index", methods=["POST"])
 @firebase_auth_required
 def dispatch_build_index(decoded_token):
+    return dispatch_request("DIALOGUE_INDEX_BUILDER_URL", DIALOGUE_INDEX_BUILDER_URL, timeout=120)
+
+
+# ★★★【新規】タグ管理のエンドポイント ★★★
+
+@app.route("/dispatch/generate-tag-suggestions", methods=["POST"])
+@firebase_auth_required
+def dispatch_generate_tag_suggestions(decoded_token):
     """
-    [認証必須] UIからの対話インデックス構築リクエストを、
-    内部の dialogue-index-builder へ転送する。
+    [認証必須] タグ最適化提案の生成を tag-management-service に依頼する。
     """
-    if not DIALOGUE_INDEX_BUILDER_URL:
-        return jsonify({"status": "error", "message": "設定エラー: 転送先URL(DIALOGUE_INDEX_BUILDER_URL)が未設定です。"}), 500
+    return dispatch_request("TAG_MANAGEMENT_SERVICE_URL", f"{TAG_MANAGEMENT_SERVICE_URL}/generate-suggestions", timeout=300)
 
-    service_token = get_service_to_service_token(DIALOGUE_INDEX_BUILDER_URL)
-    if not service_token:
-        return jsonify({"status": "error", "message": "ゲートウェイ内部エラー: サービス間認証に失敗しました。"}), 500
-
-    try:
-        headers = {
-            'Authorization': f'Bearer {service_token}',
-            'Content-Type': 'application/json'
-        }
-        
-        # インデックス構築は時間がかかる可能性があるため、タイムアウトを長めに設定
-        response = requests.post(
-            url=DIALOGUE_INDEX_BUILDER_URL,
-            headers=headers,
-            timeout=120 
-        )
-        response.raise_for_status()
-        return response.json(), response.status_code
-
-    except requests.exceptions.RequestException as e:
-        app.logger.error(f"dialogue-index-builderへの転送に失敗: {e}")
-        status_code = e.response.status_code if e.response else 503
-        return jsonify({"status": "error", "message": f"下流サービスへの接続に失敗しました。"}), status_code
+@app.route("/dispatch/execute-tag-integration", methods=["POST"])
+@firebase_auth_required
+def dispatch_execute_tag_integration(decoded_token):
+    """
+    [認証必須] タグの統合実行を tag-management-service に依頼する。
+    """
+    return dispatch_request("TAG_MANAGEMENT_SERVICE_URL", f"{TAG_MANAGEMENT_SERVICE_URL}/execute-integration", timeout=300)
 
 
 # Gunicornから直接実行されるためのエントリーポイント
