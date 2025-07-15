@@ -59,7 +59,6 @@ def dispatch_article(decoded_token):
         if not ARTICLE_INGEST_SERVICE_URL:
             return jsonify({"status": "error", "message": "設定エラー: 転送先URLが未設定です。"}), 500
 
-        # ★★★ 改善点：サービス間認証ヘッダーを付与 ★★★
         auth_headers = get_service_to_service_auth_header(ARTICLE_INGEST_SERVICE_URL)
 
         response = requests.post(
@@ -82,7 +81,6 @@ def dispatch_workflow(decoded_token):
         if not MANUAL_WORKFLOW_TRIGGER_URL:
             return jsonify({"status": "error", "message": "設定エラー: 転送先URLが未設定です。"}), 500
 
-        # ★★★ 改善点：サービス間認証ヘッダーを付与 ★★★
         auth_headers = get_service_to_service_auth_header(MANUAL_WORKFLOW_TRIGGER_URL)
 
         response = requests.post(
@@ -95,3 +93,4 @@ def dispatch_workflow(decoded_token):
     except Exception as e:
         print(f"予期せぬエラー: {e}")
         return jsonify({"status": "error", "message": f"ゲートウェイ内部エラー: {e}"}), 500
+
