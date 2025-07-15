@@ -93,4 +93,3 @@ def dispatch_workflow(decoded_token):
     except Exception as e:
         print(f"予期せぬエラー: {e}")
         return jsonify({"status": "error", "message": f"ゲートウェイ内部エラー: {e}"}), 500
-
