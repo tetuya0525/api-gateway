@@ -3,3 +3,5 @@ requests==2.31.0
 firebase-admin==6.5.0
 gunicorn==21.2.0
 Flask-Cors==4.0.1
+# ★★★【追加】サービス間認証に必須のライブラリ ★★★
+google-auth==2.29.0
